@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import sys
+
+from subprocess import Popen, PIPE, check_call
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Given multiple short-read'
+            'libraries, find k-mers that are unique to each library.')
+    parser.add_argument('--tmp-dir', default='/tmp', help='directory for'
+            'temporary files')
+    parser.add_argument('--path-to-jellyfish', default='jellyfish',
+            help="path to the jellyfish binary, in case it's not in PATH")
+    parser.add_argument('-p', '--threads', type=int, default=1,
+            help='number of threads to use in jellyfish')
+    parser.add_argument('-k', '--kmer-size', type=int)
+    parser.add_argument('-e', '--error-rate', type=float, default=0.01,
+            help='approximate error rate of sequencer')
+    parser.add_argument('-g', '--genome-size', type=float, default=3,
+            help='approximate genome size in GB')
+    parser.add_argument('read-files', nargs='+', help='one comma-separated'
+            'list of file paths for each library being compared. Files can be'
+            'in fasta or fastq format, and uncompressed or gzipped.')
+    return parser.parse_args()
+
+def run_jellyfish_count(infile_path, k, threads=1, jf_path='jellyfish',
+        tmp_dir='/tmp', error_rate=0.01, genome_size=3):
+    """
+    Given an input fasta/q file, run jellyfish count on it.
+
+    Arguments:
+    - infile_path: path to input fasta/q(.gz) file
+    - k: k-mer size
+    - threads: # threads to give jellyfish
+    - jf_path: path to jellyfish binary
+    - tmp_dir: directory for temporary files
+    - genome_size: approximate size of genome, in GB
+
+    Returns: path to the jellyfish output
+    """
+
+    outfile_path = tmp_dir + '/' + random.randint(0, 1e6) + ".jf"
+    hash_size = os.path.getsize(infile_path) * error_rate * k + genome_size*1e9
+
+    if infile_path.endswith('.gz'):
+        zcat_cmd = 'zcat {}'.format(infile_path)
+        jf_cmd = '{} count -m {} -s {} -C -t {} -o {} /dev/fd/0'.format(
+                jf_path, k, hash_size, threads, outfile_path)
+        # TODO I don't have a great understanding of the subprocess module, so
+        # we'll see if this actually works...
+        p1 = Popen(zcat_cmd, stdout=PIPE)
+        check_call(jf_cmd, stdin=p1.stdout, stderr=sys.stderr)
+        p1.stdout.close()
+    else:
+        jf_cmd = '{} count -m {} -s {} -C -t {} -o {} {}'.format(jf_path, k,
+                hash_size, threads, outfile_path, infile_path)
+        check_call(jf_cmd, stderr=sys.stderr)
+
+    return outfile_path
+
+def run_jellyfish_merge(count_files, tmp_dir='/tmp'):
+    """
+    Given a list of paths to jellyfish databases, merge
+    them into a single jellyfish database.
+
+    Arguments:
+    - count_files: list of paths to jellyfish count output
+    - tmp_dir: directory for storing output
+
+    Returns: path to merged jellyfish database
+    """
+
+    outfile_path = tmp_dir + random.randint(0, 1e6) + '.jf'
+    merge_cmd = 'jellyfish merge -o {} {}'.format(outfile_path,
+            ' '.join(count_files))
+    check_call(merge_smd)
+    return outfile_path
+
+def analyze_histogram(merge_file, num_threads=1):
+
+    histo_cmd = 'jellyfish histo -t {} {}'.format(num_threads, merge_file)
+    # TODO run this command
+    # TODO choose min and max count based on histogram
+
+    return min_count, max_count
+
+def main():
+    args = parse_args()
+
+    dump_files = []
+    for library_files_string in args.read_files:
+        count_files = map(run_jellyfish_count, library_files_string.split(','))
+        merge_file = run_jellyfish_merge(count_files)
+        min_count, max_count = analyze_histogram(merge_file)
+        dump_files.append(run_jellyfish_dump(merge_file, min_count, max_count))
+
+        # TODO clean up count files, merge file
+
+    kmer_sets = map(read_kmers_into_set, dump_files)
+    for i in range(len(kmer_sets)):
+        # TODO get union of all kmer sets except this one
+        # TODO compute set (this kmer_set) - (above set)
+        # TODO output this set!
+        pass
+
+    # TODO get rid of dump files
+
+if __name__ == '__main__':
+    main()
