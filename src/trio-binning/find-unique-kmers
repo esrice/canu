@@ -3,30 +3,41 @@
 import argparse
 import os
 import sys
+import random
+import shlex
+import math
 
-from subprocess import Popen, PIPE, check_call
+from subprocess import Popen, PIPE, check_call, check_output
+
+class HistogramError(Exception):
+    def __init__(self, histo_cmd):
+        self.message = "Could not find min and max counts in histogram. " + \
+                "Try running the following command yourself and manually " + \
+                "choosing cutoffs: {}".format(histo_cmd)
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Given multiple short-read'
+    parser = argparse.ArgumentParser(description='Given multiple short-read '
             'libraries, find k-mers that are unique to each library.')
-    parser.add_argument('--tmp-dir', default='/tmp', help='directory for'
-            'temporary files')
+    parser.add_argument('-k', '--kmer-size', type=int, required=True)
+    parser.add_argument('--tmp-dir', default='/tmp', help='directory for '
+            'temporary files [/tmp]')
     parser.add_argument('--path-to-jellyfish', default='jellyfish',
             help="path to the jellyfish binary, in case it's not in PATH")
     parser.add_argument('-p', '--threads', type=int, default=1,
-            help='number of threads to use in jellyfish')
-    parser.add_argument('-k', '--kmer-size', type=int)
+            help='number of threads to use in jellyfish [1]')
     parser.add_argument('-e', '--error-rate', type=float, default=0.01,
-            help='approximate error rate of sequencer')
+            help='approximate error rate of sequencer [0.01]')
     parser.add_argument('-g', '--genome-size', type=float, default=3,
-            help='approximate genome size in GB')
-    parser.add_argument('read-files', nargs='+', help='one comma-separated'
-            'list of file paths for each library being compared. Files can be'
+            help='approximate genome size in GB [3]')
+    parser.add_argument('-o', '--outpath', default='.', help='Prefix to write '
+            'output haplotypes to')
+    parser.add_argument('read_files', nargs='+', help='one comma-separated '
+            'list of file paths for each library being compared. Files can be '
             'in fasta or fastq format, and uncompressed or gzipped.')
     return parser.parse_args()
 
 def run_jellyfish_count(infile_path, k, threads=1, jf_path='jellyfish',
-        tmp_dir='/tmp', error_rate=0.01, genome_size=3):
+        out_dir='.', error_rate=0.01, genome_size=3):
     """
     Given an input fasta/q file, run jellyfish count on it.
 
@@ -35,77 +46,208 @@ def run_jellyfish_count(infile_path, k, threads=1, jf_path='jellyfish',
     - k: k-mer size
     - threads: # threads to give jellyfish
     - jf_path: path to jellyfish binary
-    - tmp_dir: directory for temporary files
+    - out_dir: directory for output files
     - genome_size: approximate size of genome, in GB
 
     Returns: path to the jellyfish output
     """
 
-    outfile_path = tmp_dir + '/' + random.randint(0, 1e6) + ".jf"
-    hash_size = os.path.getsize(infile_path) * error_rate * k + genome_size*1e9
+    lib_name = os.path.splitext(os.path.basename(infile_path))[0]
+    outfile_path = "{}/{}.jf".format(out_dir, lib_name)
+    hash_size = math.floor(os.path.getsize(infile_path) * error_rate * k +
+            genome_size*1e9)
 
     if infile_path.endswith('.gz'):
-        zcat_cmd = 'zcat {}'.format(infile_path)
-        jf_cmd = '{} count -m {} -s {} -C -t {} -o {} /dev/fd/0'.format(
-                jf_path, k, hash_size, threads, outfile_path)
-        # TODO I don't have a great understanding of the subprocess module, so
-        # we'll see if this actually works...
-        p1 = Popen(zcat_cmd, stdout=PIPE)
-        check_call(jf_cmd, stdin=p1.stdout, stderr=sys.stderr)
-        p1.stdout.close()
+        zcat_cmd = ['zcat', infile_path]
+        jf_cmd = [jf_path, 'count', '-m', k, '-s', hash_size, '-C',
+                '-t', threads, '-o', outfile_path, '/dev/fd/0']
+        jf_cmd = list(map(str, jf_cmd))
+        zcat_process = Popen(zcat_cmd, stdout=PIPE)
+        check_call(jf_cmd, stdin=zcat_process.stdout, stderr=sys.stderr)
+        zcat_process.stdout.close()
     else:
-        jf_cmd = '{} count -m {} -s {} -C -t {} -o {} {}'.format(jf_path, k,
-                hash_size, threads, outfile_path, infile_path)
+        jf_cmd = [jf_path, 'count', '-m', k, '-s', hash_size, '-C',
+                '-t', threads, '-o', outfile_path, infile_path]
+        jf_cmd = list(map(str, jf_cmd))
         check_call(jf_cmd, stderr=sys.stderr)
 
     return outfile_path
 
-def run_jellyfish_merge(count_files, tmp_dir='/tmp'):
+def run_jellyfish_merge(count_files, outfile_path, jf_cmd='jellyfish'):
     """
     Given a list of paths to jellyfish databases, merge
     them into a single jellyfish database.
 
     Arguments:
     - count_files: list of paths to jellyfish count output
-    - tmp_dir: directory for storing output
+    - outfile_path: path to file for output jf database
 
     Returns: path to merged jellyfish database
     """
 
-    outfile_path = tmp_dir + random.randint(0, 1e6) + '.jf'
-    merge_cmd = 'jellyfish merge -o {} {}'.format(outfile_path,
-            ' '.join(count_files))
-    check_call(merge_smd)
-    return outfile_path
+    merge_cmd = [jf_cmd, 'merge', '-o', outfile_path, ' '.join(count_files)]
+    check_call(merge_cmd)
 
-def analyze_histogram(merge_file, num_threads=1):
+def analyze_histogram(jellyfish_db, num_threads=1, jf_cmd='jellyfish'):
+    """
+    Given a jellyfish database, run jellyfish histo to
+    compute a histogram of k-mer counts, and then use this
+    histogram to choose minimum and maximum k-mer counts
+    for finding unique k-mers.
 
-    histo_cmd = 'jellyfish histo -t {} {}'.format(num_threads, merge_file)
-    # TODO run this command
-    # TODO choose min and max count based on histogram
+    Arguments:
+    - jellyfish_db: path to jellyfish database
+    - num_threads: number of threads to give jellyfish
 
-    return min_count, max_count
+    Returns: (min_coverage, max_coverage), the min and max
+             k-mer counts for finding unique k-mers
+    """
+
+    histo_cmd = [jf_cmd, 'histo', '-t', num_threads, jellyfish_db]
+    histo_cmd = list(map(str, histo_cmd))
+    min_coverage, max_coverage = False, False
+
+    histo_proc = Popen(histo_cmd, stdout=PIPE, stderr=sys.stderr, bufsize=1,
+            universal_newlines=True)
+
+    for line in histo_proc.stdout:
+        coverage, count = map(int, line.strip().split())
+        if coverage != 1: # don't do anything except record the first entry
+
+            # if we haven't yet found the minimum coverage, we're looking for
+            # a local minimum, i.e., a place where count starts increasing
+            if not min_coverage:
+                if count > last_count:
+                    min_coverage = coverage - 1
+                    min_coverage_count = last_count
+
+            # if we have found the minimum coverage already, we're looking for
+            # the place where the count dips below the count at min_coverage
+            elif not max_coverage:
+                if count < min_coverage_count:
+                    max_coverage = coverage
+                    break
+
+        last_count = count
+
+    histo_proc.stdout.close()
+
+    if not min_coverage or not max_coverage:
+        raise HistogramError(histo_cmd)
+
+    return min_coverage, max_coverage
+
+def run_jellyfish_dump(jellyfish_db, min_count, max_count, jf_cmd='jellyfish'):
+    """
+    Given a jellyfish database and a min and max count to
+    output, dump all k-mers within that range into a
+    set.
+
+    Arguments:
+    - jellyfish_db: path to jellyfish database
+    - min_count: minimum k-mer count to output a k-mer
+    - max_count: maximum k-mer count to output a k-mer
+    - jf_cmd: path to jellyfish binary
+
+    Returns: a set of strings where each string is a k-mer
+             found in jellyfish_db with count within the
+             bounds [min_count, max_count]
+    """
+
+    jellyfish_cmd = [jf_cmd, 'dump', '-c', '-t', '-L', min_count,
+            '-U', max_count, '-o', outfile_path, jellyfish_db]
+    jellyfish_cmd = list(map(str, jellyfish_cmd))
+    jellyfish_proc = Popen(jellyfish_cmd, stdout=PIPE, stderr=sys.stderr,
+            bufsize=1, universal_newlines=True)
+
+    kmer_set = set()
+    for line in jellyfish_proc.stdout:
+        kmer, count = line.strip().split('\t')
+        kmer_set.add(kmer)
+
+    jellyfish_proc.stdout.close()
+
+    return kmer_set
+
+def read_kmers_into_set(kmer_dump_path):
+    """
+    Given the path to a kmer dump file, parse it and
+    return a set of kmer strings present in that file.
+    """
+    kmer_set = set()
+    with open(kmer_dump_path, 'r') as kmer_dump_file:
+        for line in kmer_dump_file:
+            kmer, count = line.split('\t')
+            kmer_set.add(kmer)
+    return kmer_set
 
 def main():
     args = parse_args()
 
-    dump_files = []
-    for library_files_string in args.read_files:
-        count_files = map(run_jellyfish_count, library_files_string.split(','))
-        merge_file = run_jellyfish_merge(count_files)
-        min_count, max_count = analyze_histogram(merge_file)
-        dump_files.append(run_jellyfish_dump(merge_file, min_count, max_count))
+    # jf_databases is a list of 3-tuples (jf_database, min_count, max_count),
+    # where jf_database is the path to a jellyfish database representing all
+    # k-mers in the haplotype, and min/max_count are the bounds on k-mer count
+    # for using a k-mer from this database
+    jf_databases = []
+    for i, haplotype_files_string in enumerate(args.read_files):
+        print("Analyzing haplotype {}...".format(i+1), file=sys.stderr)
 
-        # TODO clean up count files, merge file
+        # calculate counts for each file individually
+        count_files = []
+        for haplotype_file in haplotype_files_string.split(','):
+            print("Counting k-mers in {}".format(library_file),
+                    file=sys.stderr)
+            this_count_file = run_jellyfish_count(haplotype_file,
+                    args.kmer_size, args.threads, args.path_to_jellyfish,
+                    args.outpath, args.error_rate, args.genome_size)
+            count_files.append(this_count_file)
 
-    kmer_sets = map(read_kmers_into_set, dump_files)
+        # if there are multiple count files, merge them
+        if len(count_files) > 1:
+            print("Merging {} files...".format(len(count_files)),
+                    file=sys.stderr)
+            merge_file = "{}/haplotypeA.jf".format(args.outpath)
+            run_jellyfish_merge(count_files, outfile, args.path_to_jellyfish)
+
+            # clean these up since all they have been merged into one file
+            for count_file in count_files:
+                os.remove(count_file)
+        else:
+            merge_file = count_files[0]
+
+        # get the histogram and analyze it
+        print("Computing and analyzing histogram...", file=sys.stderr)
+        min_count, max_count = analyze_histogram(merge_file, args.threads,
+                args.path_to_jellyfish)
+
+        jf_databases.append((merge_file, min_count, max_count))
+
+    # we do the dumping in its own loop because we're dumping k-mers into
+    # memory, and we don't want to start doing that before we're done running
+    # jellyfish count as that needs a lot of memory too
+    kmer_sets = []
+    for jf_database, min_count, max_count in jf_databases:
+        # dump k-mer database into a set
+        print("Dumping k-mer database {}...".format(jf_database)
+        kmer_sets.append(run_jellyfish_dump(merge_file, min_count, max_count,
+                args.path_to_jellyfish))
+
+    # now that we've got all the k-mer sets nicely loaded into memory, we find
+    # k-mers that are unique to each haplotype
     for i in range(len(kmer_sets)):
-        # TODO get union of all kmer sets except this one
-        # TODO compute set (this kmer_set) - (above set)
-        # TODO output this set!
-        pass
+        print("Finding k-mers unique to haplotype {}...".format(i+1),
+                file=sys.stderr)
+        # make a set of unique kmers for this haplotype
+        unique_kmers = kmer_sets[i]
+        for j in range(len(kmer_sets)):
+            if i != j:
+                unique_kmers -= kmer_sets[j]
 
-    # TODO get rid of dump files
+        # output this set of unique kmers
+        with open("{}/haplotype{}.kmers".format(args.outpath, i+1)) as outfile:
+            for kmer in our_kmers:
+                print(kmer, file=outfile)
 
 if __name__ == '__main__':
     main()
+
